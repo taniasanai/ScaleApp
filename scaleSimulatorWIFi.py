@@ -15,10 +15,10 @@ patterns = [
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.bind((HOST, PORT))
 server.listen(1)
-print(f"✅ Fake scale (patterned) running on {HOST}:{PORT}... Waiting for connection.")
+print(f"Fake scale (patterned) running on {HOST}:{PORT}... Waiting for connection.")
 
 conn, addr = server.accept()
-print(f"✅ Logger connected from {addr}")
+print(f"Logger connected from {addr}")
 
 while True:
     weight = random.uniform(5, 50)  # Generate a fake weight
@@ -26,6 +26,6 @@ while True:
     message = random.choice(patterns).format(weight)
     data = f"{message}\r\n"
 
-    print(f"📤 Sending: {data.strip()}")
+    print(f"Sending: {data.strip()}")
     conn.sendall(data.encode())
     time.sleep(2)  # Send every 2 seconds
