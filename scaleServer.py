@@ -28,16 +28,44 @@ def app_dir():
     return Path(__file__).resolve().parent
 
 
-def setup_logging(output_dir):
+def load_config(path):
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def output_dir_for(config, simulator):
+    output_dir = app_dir() / config["output_dir"]
+    # Keep test data away from the real records.
+    return output_dir / "simulator" if simulator else output_dir
+
+
+def setup_logging(output_dir, console=True):
     output_dir.mkdir(parents=True, exist_ok=True)
     formatter = logging.Formatter("%(asctime)s  %(levelname)-7s  %(message)s",
                                   "%Y-%m-%d %H:%M:%S")
-    console = logging.StreamHandler()
-    log_file = RotatingFileHandler(output_dir / "app.log", maxBytes=1_000_000,
-                                   backupCount=5, encoding="utf-8")
-    for handler in (console, log_file):
+    handlers = [RotatingFileHandler(output_dir / "app.log", maxBytes=1_000_000,
+                                    backupCount=5, encoding="utf-8")]
+    if console:
+        handlers.append(logging.StreamHandler())
+    for handler in handlers:
         handler.setFormatter(formatter)
-    logging.basicConfig(level=logging.INFO, handlers=[console, log_file])
+    logging.basicConfig(level=logging.INFO, handlers=handlers)
+
+
+def acquire_single_instance(output_dir):
+    """Returns a lock to hold while running, or None if another copy is already running.
+
+    Two copies would compete for the scales' connections and the same Excel files.
+    """
+    lock_file = open(output_dir / "app.lock", "w")
+    try:
+        import msvcrt
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+    except ImportError:
+        pass  # not Windows; the program only runs on Windows in practice
+    except OSError:
+        lock_file.close()
+        return None
+    return lock_file
 
 
 def create_readers(config, scales, on_record, output_dir):
@@ -51,9 +79,43 @@ def create_readers(config, scales, on_record, output_dir):
         readers.append(ScaleReader(
             scale["name"], scale["host"], scale["port"],
             LineParser(parsing["stable_pattern"], parsing["weight_pattern"]),
-            WeighingDetector(config["zero_threshold"]),
+            WeighingDetector(config["zero_threshold"],
+                             output_dir / "state" / f"{scale['name']}.json"),
             on_record, raw_log))
     return readers
+
+
+def start_logging(config, output_dir, simulator, on_record=None):
+    """Starts reading every enabled scale and returns (store, readers).
+
+    on_record(record) is called from a scale's thread after each weighing is saved.
+    """
+    unit = config["unit"]
+    store = RecordStore(output_dir, unit)
+    store.sync_recent()
+
+    def save(scale, weight, timestamp):
+        record = store.add(scale, weight, timestamp)
+        log.info("%s: recorded %s %s", scale, weight, unit)
+        if on_record:
+            on_record(record)
+
+    scales = config["simulator_scales"] if simulator else config["scales"]
+    readers = create_readers(config, scales, save, output_dir)
+    for reader in readers:
+        reader.start()
+    if readers:
+        log.info("Logging %s to %s", ", ".join(r.scale_name for r in readers), output_dir)
+    return store, readers
+
+
+def stop_logging(store, readers):
+    """Stops the readers and brings the Excel files up to date."""
+    for reader in readers:
+        reader.stop()
+    for reader in readers:
+        reader.join(timeout=5)
+    store.sync()
 
 
 def main():
@@ -71,41 +133,27 @@ def main():
         findScales.main(None if args.scan == "auto" else args.scan)
         return
 
-    config = json.loads(args.config.read_text(encoding="utf-8"))
-    output_dir = app_dir() / config["output_dir"]
-    if args.simulator:
-        output_dir /= "simulator"  # keep test data away from the real records
+    config = load_config(args.config)
+    output_dir = output_dir_for(config, args.simulator)
     setup_logging(output_dir)
+    lock = acquire_single_instance(output_dir)
+    if lock is None:
+        log.error("ScaleApp is already running")
+        return
 
-    unit = config["unit"]
-    store = RecordStore(output_dir, unit)
-    store.sync_recent()
-
-    def save(scale, weight, timestamp):
-        store.add(scale, weight, timestamp)
-        log.info("%s: recorded %s %s", scale, weight, unit)
-
-    scales = config["simulator_scales"] if args.simulator else config["scales"]
-    readers = create_readers(config, scales, save, output_dir)
+    store, readers = start_logging(config, output_dir, args.simulator)
     if not readers:
         log.error("No scales are enabled in %s", args.config)
         return
 
-    log.info("Logging %s to %s - press Ctrl+C to stop",
-             ", ".join(r.scale_name for r in readers), output_dir)
-    for reader in readers:
-        reader.start()
+    log.info("Press Ctrl+C to stop")
     try:
         while True:
             time.sleep(SYNC_INTERVAL)
             store.sync()
     except KeyboardInterrupt:
         log.info("Stopping...")
-    for reader in readers:
-        reader.stop()
-    for reader in readers:
-        reader.join(timeout=5)
-    store.sync()
+    stop_logging(store, readers)
 
 
 if __name__ == "__main__":

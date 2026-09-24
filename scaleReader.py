@@ -1,5 +1,7 @@
 """Reads weights from a scale over TCP and turns them into weighing records."""
+import json
 import logging
+import os
 import re
 import socket
 import threading
@@ -55,11 +57,16 @@ class WeighingDetector:
     scale settles back to zero. The heaviest stable weight seen in between is
     reported, so adding more items to the pile, or taking them off one at a
     time, still gives the full total.
+
+    With a state_file, the load in progress is saved there, so a load that's
+    still on the scale when the program stops (or crashes) is recorded exactly
+    once, when the scale is next seen back at zero.
     """
 
-    def __init__(self, zero_threshold):
+    def __init__(self, zero_threshold, state_file=None):
         self.zero_threshold = zero_threshold
-        self.peak = None  # (weight, timestamp) of the load currently on the scale
+        self.state_file = Path(state_file) if state_file else None
+        self.peak = self._load_state()  # (weight, timestamp) of the load on the scale
 
     def feed(self, reading, timestamp):
         """Returns (weight, timestamp) when a load has been removed, else None."""
@@ -68,13 +75,42 @@ class WeighingDetector:
         if reading.weight <= self.zero_threshold:
             return self.flush()
         if self.peak is None or reading.weight > self.peak[0]:
-            self.peak = (reading.weight, timestamp)
+            self._set_peak((reading.weight, timestamp))
         return None
 
     def flush(self):
         """Ends the current load (if any) and returns it."""
-        completed, self.peak = self.peak, None
+        completed = self.peak
+        if completed is not None:
+            self._set_peak(None)
         return completed
+
+    def _set_peak(self, peak):
+        self.peak = peak
+        if not self.state_file:
+            return
+        if peak is None:
+            self.state_file.unlink(missing_ok=True)
+            return
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        temp = self.state_file.with_suffix(".tmp")
+        weight, timestamp = peak
+        temp.write_text(json.dumps({"weight": weight, "timestamp": timestamp.isoformat()}),
+                        encoding="utf-8")
+        os.replace(temp, self.state_file)
+
+    def _load_state(self):
+        if not self.state_file or not self.state_file.exists():
+            return None
+        try:
+            state = json.loads(self.state_file.read_text(encoding="utf-8"))
+            peak = (float(state["weight"]), datetime.fromisoformat(state["timestamp"]))
+        except (OSError, ValueError, KeyError) as e:
+            log.warning("Ignoring unreadable %s: %s", self.state_file, e)
+            return None
+        log.info("%s: resuming a load of %s left on the scale at %s",
+                 self.state_file.stem, peak[0], f"{peak[1]:%Y-%m-%d %H:%M:%S}")
+        return peak
 
 
 class RawLog:
@@ -105,6 +141,9 @@ class ScaleReader(threading.Thread):
     Runs in its own thread and reconnects automatically whenever the
     connection drops, so a WiFi hiccup doesn't stop the logging.
     on_record(scale_name, weight, timestamp) is called from this thread.
+
+    status ("connecting", "connected" or "disconnected") and last_reading
+    ((Reading, timestamp) or None) can be read from other threads for display.
     """
 
     def __init__(self, name, host, port, parser, detector, on_record, raw_log=None):
@@ -116,6 +155,8 @@ class ScaleReader(threading.Thread):
         self.detector = detector
         self.on_record = on_record
         self.raw_log = raw_log
+        self.status = "connecting"
+        self.last_reading = None
         self._stop_event = threading.Event()
 
     def stop(self):
@@ -127,17 +168,20 @@ class ScaleReader(threading.Thread):
             try:
                 with self._connect() as sock:
                     log.info("%s: connected to %s:%s", self.scale_name, self.host, self.port)
+                    self.status = "connected"
                     delay = RECONNECT_MIN
                     self._read_until_disconnected(sock)
             except OSError as e:
                 if not self._stop_event.is_set():
                     log.warning("%s: %s - retrying in %d s",
                                 self.scale_name, str(e) or type(e).__name__, delay)
+            self.status = "disconnected"
+            self.last_reading = None
             if self._stop_event.wait(delay):
                 break
             delay = min(delay * 2, RECONNECT_MAX)
-        # Save a load that's still on the scale when the program is closed.
-        self._emit(self.detector.flush())
+        # A load still on the scale stays in the detector's state file and is
+        # recorded after the next start, once it's removed.
         log.info("%s: stopped", self.scale_name)
 
     def _connect(self):
@@ -179,6 +223,7 @@ class ScaleReader(threading.Thread):
         if reading is None:
             log.debug("%s: could not read a weight from %r", self.scale_name, text)
             return
+        self.last_reading = (reading, now)
         self._emit(self.detector.feed(reading, now))
 
     def _emit(self, completed):

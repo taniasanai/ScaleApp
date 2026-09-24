@@ -58,6 +58,21 @@ class RecordStore:
             self._sync_pending()
         return record
 
+    def records_for(self, day):
+        """Returns the day's records (as saved in the journal), oldest first."""
+        with self._lock:
+            path = self._journal_path(day)
+            if not path.exists():
+                return []
+            with open(path, newline="", encoding="utf-8") as f:
+                return list(csv.DictReader(f))
+
+    @property
+    def unsynced_files(self):
+        """Names of workbooks that currently can't be updated (e.g. open in Excel)."""
+        with self._lock:
+            return sorted(path.name for path in self._problem_files)
+
     def sync(self):
         """Retries copying records into workbooks that couldn't be written before."""
         with self._lock:

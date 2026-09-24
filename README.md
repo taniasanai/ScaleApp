@@ -19,12 +19,14 @@ The serial-to-network converters act as TCP servers: each one exposes its scale'
 - **One record per weighing.** A weighing starts with a stable weight above `zero_threshold` and ends when the scale returns to zero. The highest stable weight in between is recorded, so adding items to the pile, or removing them one at a time, still gives the full total.
 - **One Excel file per day** (`logFiles/scale_data_YYYY-MM-DD.xlsx`) with the record ID, date, time, scale and weight, plus empty Seller, Material and Notes columns for the user. New rows are only appended, so anything typed in those columns is kept.
 - **No lost records.** Each record is first saved to `logFiles/journal/` and then copied to Excel. If the Excel file is open when a weighing happens, the row is added once the file is closed.
+- **Loads on the scale when the program closes** are saved in `logFiles/state/` and recorded once, after the next start, when the scale returns to zero.
 - **Automatic reconnection** when a scale's connection drops.
 - **Raw capture.** Everything each scale sends is saved to `logFiles/raw/`, to check the real data format when the scales are first connected.
 
 | File | Purpose |
 |---|---|
-| `scaleServer.py` | Main program |
+| `scaleApp.py` | Main program: window with each scale's status and live weight, today's weighings, and buttons to open the Excel file and records folder |
+| `scaleServer.py` | The same without a window (console), plus the network scan (`--scan`) |
 | `scaleReader.py` | Scale connection, data parsing and weighing detection |
 | `recordStore.py` | Journal and daily Excel files |
 | `findScales.py` | Network scan for the converters |
@@ -41,13 +43,13 @@ pip install -r requirements.txt
 **With the simulator** (no hardware needed), in two terminals:
 ```
 python scaleSimulator.py          # add --fast for 10x speed, --flaky to drop connections
-python scaleServer.py --simulator # records go to logFiles/simulator/
+python scaleApp.py --simulator    # records go to logFiles/simulator/
 ```
 
 **With the real scales:**
 1. Find the converters: `python scaleServer.py --scan` (or `--scan 192.168.0.0/24` for a specific network). It lists open devices and a sample of what they send.
 2. Put each scale's `host` and `port` in `config.json`.
-3. Run `python scaleServer.py`. Stop it with Ctrl+C.
+3. Run `python scaleApp.py` (or `python scaleServer.py` for the console version, stopped with Ctrl+C). Only one copy can run at a time.
 4. Open `logFiles/raw/` to see the scales' actual output. If weighings aren't being recorded, adjust the `parsing` patterns to match it.
 
 **Tests:** `python -m unittest discover -s tests -t .`

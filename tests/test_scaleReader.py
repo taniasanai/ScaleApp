@@ -1,8 +1,10 @@
 import socket
+import tempfile
 import threading
 import time
 import unittest
 from datetime import datetime
+from pathlib import Path
 
 from scaleReader import LineParser, Reading, ScaleReader, WeighingDetector
 
@@ -54,6 +56,35 @@ class WeighingDetectorTest(unittest.TestCase):
     def test_negative_reading_ends_the_load(self):
         records, _ = self.feed_all([(12, True), (-0.4, True)])
         self.assertEqual(records, [(12, 0)])
+
+
+class WeighingDetectorRestartTest(unittest.TestCase):
+    PLACED = datetime(2026, 9, 24, 9, 0, 0)
+    LATER = datetime(2026, 9, 24, 9, 5, 0)
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.state_file = Path(self.temp_dir.name) / "state" / "WT1000.json"
+        before_restart = WeighingDetector(0.5, self.state_file)
+        before_restart.feed(Reading(40.0, True), self.PLACED)
+        self.after_restart = WeighingDetector(0.5, self.state_file)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_load_still_on_the_scale_is_recorded_once(self):
+        self.assertIsNone(self.after_restart.feed(Reading(40.0, True), self.LATER))
+        self.assertEqual(self.after_restart.feed(Reading(0.0, True), self.LATER),
+                         (40.0, self.PLACED))
+        self.assertFalse(self.state_file.exists())
+
+    def test_load_removed_while_closed_is_recorded_with_its_original_time(self):
+        self.assertEqual(self.after_restart.feed(Reading(0.0, True), self.LATER),
+                         (40.0, self.PLACED))
+
+    def test_unreadable_state_file_is_ignored(self):
+        self.state_file.write_text("not json")
+        self.assertIsNone(WeighingDetector(0.5, self.state_file).peak)
 
 
 class ScaleReaderTest(unittest.TestCase):
