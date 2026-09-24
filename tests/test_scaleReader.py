@@ -1,3 +1,4 @@
+import json
 import socket
 import tempfile
 import threading
@@ -23,6 +24,40 @@ class LineParserTest(unittest.TestCase):
     def test_weight_group_is_used_when_present(self):
         parser = LineParser("ST", r"W=(\d+\.\d+)")
         self.assertEqual(parser.parse("ID01 ST W=7.25"), Reading(7.25, True))
+
+
+class ManualFormatsTest(unittest.TestCase):
+    """The parsing in config.json against the example lines in the Weightech manuals."""
+
+    @classmethod
+    def setUpClass(cls):
+        config = json.loads((Path(__file__).parent.parent / "config.json").read_text())
+        scales = {s["name"]: {**config["parsing"], **s.get("parsing", {})}
+                  for s in config["scales"]}
+        cls.parsers = {name: LineParser(p["stable_pattern"], p["weight_pattern"])
+                       for name, p in scales.items()}
+
+    def test_wt1000_full_mode_reads_the_net_weight(self):
+        parse = self.parsers["WT1000"].parse
+        # Manual section 6.1: gross 10 kg, tare 0.2 kg, net 9.8 kg (flag 1 = unstable).
+        self.assertEqual(parse("1,010.000,000.200,009.800"), Reading(9.8, False))
+        self.assertEqual(parse("0,010.000,000.200,009.800"), Reading(9.8, True))
+        self.assertEqual(parse("0,000.000,000.200,-00.200"), Reading(-0.2, True))
+
+    def test_wt1000_overload_is_ignored(self):
+        self.assertIsNone(self.parsers["WT1000"].parse("0,    ol,    ol,    ol"))
+        self.assertIsNone(self.parsers["WT1000"].parse("0,-   ol,-   ol,-   ol"))
+
+    def test_wt3000i_full_format(self):
+        parse = self.parsers["WT3000i"].parse
+        # Manual section 3.2.1.
+        self.assertEqual(parse("ST,GS,+0012.345  kg"), Reading(12.345, True))
+        self.assertEqual(parse("ST,NT,+0012.345  kg"), Reading(12.345, True))
+        self.assertEqual(parse("US,GS,+01234.56  kg"), Reading(1234.56, False))
+        self.assertEqual(parse("ST,GS,+123456kg"), Reading(123456.0, True))
+
+    def test_wt3000i_overload_is_ignored(self):
+        self.assertIsNone(self.parsers["WT3000i"].parse("OL,GS,+            "))
 
 
 class WeighingDetectorTest(unittest.TestCase):

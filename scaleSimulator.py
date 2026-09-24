@@ -18,11 +18,12 @@ import time
 
 HOST = "127.0.0.1"
 
-# (name, port, stable format, unstable format). The two use different formats on
-# purpose, to check that the default parsing settings handle both.
+# (name, port, stable format, unstable format), following the Weightech manuals.
 SCALES = [
-    ("FakeWT1000", 4001, "ST,GS,{:+09.2f}kg", "US,GS,{:+09.2f}kg"),
-    ("FakeWT3000i", 4002, "{:+.2f} kg ST", "{:+.2f} kg US"),
+    # WT1000 (LED/LCD), P5=5: stability flag (0 stable, 1 unstable), gross, tare, net.
+    ("FakeWT1000", 4001, "0,{0:07.3f},000.000,{0:07.3f}", "1,{0:07.3f},000.000,{0:07.3f}"),
+    # WT3000-I, full format in continuous transmission: status, gross/net, weight, unit.
+    ("FakeWT3000i", 4002, "ST,GS,{0:+09.2f}  kg", "US,GS,{0:+09.2f}  kg"),
 ]
 
 
