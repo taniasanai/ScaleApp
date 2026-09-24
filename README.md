@@ -54,6 +54,20 @@ python scaleApp.py --simulator    # records go to logFiles/simulator/
 
 **Tests:** `python -m unittest discover -s tests -t .`
 
+## Building the program for the business PC
+Run `build.bat`. It creates `dist\ScaleApp\` with:
+- `ScaleApp.exe`: the program the owner uses (window)
+- `ScaleAppConsole.exe`: console version, used during setup to find the scales (`ScaleAppConsole.exe --scan`)
+- `config.json`: the settings
+
+The business PC doesn't need Python. To install:
+1. Copy the `ScaleApp` folder to the PC, e.g. to `C:\ScaleApp`. Avoid OneDrive or other synced folders, which can lock the Excel files.
+2. Set up `config.json` (see *Setting up the scales on-site* below). Records are saved in `logFiles` inside this folder.
+3. Start automatically with Windows: press `Win + R`, type `shell:startup`, and put a shortcut to `ScaleApp.exe` in the folder that opens.
+4. Put a shortcut to `ScaleApp.exe` on the desktop too, in case it gets closed.
+
+`build.bat` never overwrites an existing `dist\ScaleApp\config.json`, so settings made there for the real scales are kept when rebuilding.
+
 ## Settings (`config.json`)
 | Setting | Meaning |
 |---|---|
@@ -92,4 +106,4 @@ The indicators and converters must be configured as below, or the app receives n
 - The serial settings must match its scale: same baud rate, 8 data bits, no parity, 1 stop bit.
 - The work mode must be **TCP Server**. Note the IP address and port, and put them in `config.json`. A fixed IP address stops the address from changing.
 
-**Check:** run `python scaleServer.py --scan`. Each scale should appear with a sample like the ones in the table above. Then weigh a few known items and compare them with the Excel file.
+**Check:** run `ScaleAppConsole.exe --scan` (or `python scaleServer.py --scan`). Each scale should appear with a sample like the ones in the table above. Then weigh a few known items and compare them with the Excel file.
