@@ -1,151 +1,111 @@
-import socket
-import threading
+"""ScaleApp: logs every weighing from the industrial scales to a daily Excel file.
+
+    python scaleServer.py              read the scales listed in config.json
+    python scaleServer.py --simulator  read scaleSimulator.py running on this computer
+    python scaleServer.py --scan       search the network for the scales' converters
+"""
+import argparse
+import json
+import logging
+import sys
 import time
-import pandas as pd
-from datetime import datetime
-import re
-import ipaddress
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+
+import findScales
+from recordStore import RecordStore
+from scaleReader import LineParser, RawLog, ScaleReader, WeighingDetector
+
+SYNC_INTERVAL = 30  # seconds between retries of Excel updates that failed (e.g. file open)
+
+log = logging.getLogger("scaleapp")
 
 
-# ---------------- CONFIGURATION ----------------
-mode = "simulator"   # ⬅️ Set to "real" when connecting to actual scales
-
-# Real device IPs (used only when mode="real")
-REAL_SCALES = [
-    ("192.168.1.100", 4001, "WT1000"),
-    ("192.168.1.101", 4001, "WT3000i")
-]
-
-# Simulator IP/port (used only when mode="simulator")
-SIMULATOR = ("127.0.0.1", 4001, "FakeScale")
+def app_dir():
+    """Folder holding config.json and logFiles: next to the .exe once packaged."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
+    return Path(__file__).resolve().parent
 
 
-# ---------------- NETWORK SCAN (real devices only) ----------------
-def find_network_devices(network="192.168.1.0/24"):
-    ports = [23, 4001, 4002, 8080, 502, 4196]
-    found_devices = []
-    print(f"Scanning network {network} ...")
-    for ip in ipaddress.IPv4Network(network, False):
-        for port in ports:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(0.5)
-            if sock.connect_ex((str(ip), port)) == 0:
-                print(f"Found device at {ip}:{port}")
-                found_devices.append((str(ip), port))
-            sock.close()
-    return found_devices
+def setup_logging(output_dir):
+    output_dir.mkdir(parents=True, exist_ok=True)
+    formatter = logging.Formatter("%(asctime)s  %(levelname)-7s  %(message)s",
+                                  "%Y-%m-%d %H:%M:%S")
+    console = logging.StreamHandler()
+    log_file = RotatingFileHandler(output_dir / "app.log", maxBytes=1_000_000,
+                                   backupCount=5, encoding="utf-8")
+    for handler in (console, log_file):
+        handler.setFormatter(formatter)
+    logging.basicConfig(level=logging.INFO, handlers=[console, log_file])
 
 
-# ---------------- SCALE READER CLASS ----------------
-class ScaleReader:
-    def __init__(self, ip, port, name):
-        self.ip = ip
-        self.port = port
-        self.name = name
-        self.socket = None
-        self.running = False
-        self.stable_weights = []
-
-    def connect(self):
-        try:
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.settimeout(3)
-            self.socket.connect((self.ip, self.port))
-            print(f"Connected to {self.name} at {self.ip}:{self.port}")
-            return True
-        except Exception as e:
-            print(f"Failed to connect to {self.name}: {e}")
-            return False
-
-    def parse_weight(self, data):
-        patterns = [
-            r'ST.*?([+-]?\d+\.?\d*)',
-            r'([+-]?\d+\.?\d*).*?ST',
-            r'([+-]?\d+\.?\d*)\s*kg.*?ST',
-        ]
-        for p in patterns:
-            m = re.search(p, data)
-            if m:
-                try:
-                    return float(m.group(1)), True
-                except ValueError:
-                    continue
-        return None, False
-
-    def read_continuous(self, duration=1):
-        if not self.connect():
-            return
-        self.running = True
-        end_time = time.time() + duration * 60
-        while self.running and time.time() < end_time:
-            try:
-                raw = self.socket.recv(1024).decode(errors='ignore').strip()
-                if raw:
-                    print(f"RAW → {self.name}: {repr(raw)}")
-                    weight, stable = self.parse_weight(raw)
-                    if weight is not None and stable:
-                        self.stable_weights.append({
-                            'timestamp': datetime.now(),
-                            'scale': self.name,
-                            'weight': weight,
-                            'raw_data': raw
-                        })
-                        print(f"Check {self.name}: {weight} kg")
-            except socket.timeout:
-                continue
-            except Exception as e:
-                print(f"Error {self.name}: {e}")
-                break
-            time.sleep(0.2)
-        self.socket.close()
-        print(f"Disconnected from {self.name}")
-
-    def stop(self):
-        self.running = False
+def create_readers(config, scales, on_record, output_dir):
+    readers = []
+    for scale in scales:
+        if not scale.get("enabled", True):
+            continue
+        # A scale can override the default patterns, since the two models may differ.
+        parsing = {**config["parsing"], **scale.get("parsing", {})}
+        raw_log = RawLog(output_dir / "raw", scale["name"]) if config["save_raw_data"] else None
+        readers.append(ScaleReader(
+            scale["name"], scale["host"], scale["port"],
+            LineParser(parsing["stable_pattern"], parsing["weight_pattern"]),
+            WeighingDetector(config["zero_threshold"]),
+            on_record, raw_log))
+    return readers
 
 
-# ---------------- MAIN ----------------
 def main():
-    # Select device list based on mode
-    if mode == "simulator":
-        print("Running in SIMULATOR mode")
-        scales = [ScaleReader(*SIMULATOR)]
-        found = []
-    else:
-        print("Running in REAL DEVICE mode")
-        scales = [ScaleReader(ip, port, name) for ip, port, name in REAL_SCALES]
-        found = find_network_devices("192.168.1.0/24")
+    parser = argparse.ArgumentParser(description="Log weighings from the scales to Excel.")
+    parser.add_argument("--simulator", action="store_true",
+                        help="read from scaleSimulator.py instead of the real scales")
+    parser.add_argument("--scan", nargs="?", const="auto", metavar="NETWORK",
+                        help="search a network (default: this computer's) for the scales "
+                             "and exit")
+    parser.add_argument("--config", type=Path, default=app_dir() / "config.json",
+                        help="settings file (default: config.json next to the program)")
+    args = parser.parse_args()
 
-        if found:
-            print(f"Devices detected: {found}")
+    if args.scan:
+        findScales.main(None if args.scan == "auto" else args.scan)
+        return
 
-    # Start reading threads
-    threads = []
-    for s in scales:
-        t = threading.Thread(target=s.read_continuous, args=(1,))  # 1 minute test
-        t.start()
-        threads.append(t)
+    config = json.loads(args.config.read_text(encoding="utf-8"))
+    output_dir = app_dir() / config["output_dir"]
+    if args.simulator:
+        output_dir /= "simulator"  # keep test data away from the real records
+    setup_logging(output_dir)
 
-    # Wait for threads
+    unit = config["unit"]
+    store = RecordStore(output_dir, unit)
+    store.sync_recent()
+
+    def save(scale, weight, timestamp):
+        store.add(scale, weight, timestamp)
+        log.info("%s: recorded %s %s", scale, weight, unit)
+
+    scales = config["simulator_scales"] if args.simulator else config["scales"]
+    readers = create_readers(config, scales, save, output_dir)
+    if not readers:
+        log.error("No scales are enabled in %s", args.config)
+        return
+
+    log.info("Logging %s to %s - press Ctrl+C to stop",
+             ", ".join(r.scale_name for r in readers), output_dir)
+    for reader in readers:
+        reader.start()
     try:
-        for t in threads:
-            t.join()
+        while True:
+            time.sleep(SYNC_INTERVAL)
+            store.sync()
     except KeyboardInterrupt:
-        for s in scales:
-            s.stop()
-
-    # Save results
-    all_data = []
-    for s in scales:
-        all_data.extend(s.stable_weights)
-
-    if all_data:
-        df = pd.DataFrame(all_data)
-        filename = f"logFiles\scale_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        df.to_excel(filename, index=False)
-        print(f"Data saved to {filename}")
-    else:
-        print("No stable readings captured.")
+        log.info("Stopping...")
+    for reader in readers:
+        reader.stop()
+    for reader in readers:
+        reader.join(timeout=5)
+    store.sync()
 
 
 if __name__ == "__main__":

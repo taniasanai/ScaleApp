@@ -14,9 +14,54 @@ The stakeholder has two WeighTech industrial scales: WT1000 and WT3000i. (More d
 The first one uses an RS-232 to connect to the WiFi through a USR-W610 converter device. The second one connects to a USR-TCP232-306 device using RS-232 and Ethernet wires.
 
 ## The software
-The system consists of a server that is responsible for identifying the IP addresses that the scales connect to. Having that information, the system then connects to the scales and continuously reads the input of stable weight data, which is written to an Excel file for their records.
+The serial-to-network converters act as TCP servers: each one exposes its scale's RS-232 output on a network port. The system connects to both scales, keeps reading their output, and records one entry per weighing (a load placed on the scale, settled, and removed) in an Excel file for that day. A network scan helps find the converters' IP addresses during setup.
 
-For testing code purposes, I developed a scale simulator. The code acts as a client of the previously mentioned server and generates random data to send to the server. That is available as "scaleSimulatorWiFi.py".
+- **One record per weighing.** A weighing starts with a stable weight above `zero_threshold` and ends when the scale returns to zero. The highest stable weight in between is recorded, so adding items to the pile, or removing them one at a time, still gives the full total.
+- **One Excel file per day** (`logFiles/scale_data_YYYY-MM-DD.xlsx`) with the record ID, date, time, scale and weight, plus empty Seller, Material and Notes columns for the user. New rows are only appended, so anything typed in those columns is kept.
+- **No lost records.** Each record is first saved to `logFiles/journal/` and then copied to Excel. If the Excel file is open when a weighing happens, the row is added once the file is closed.
+- **Automatic reconnection** when a scale's connection drops.
+- **Raw capture.** Everything each scale sends is saved to `logFiles/raw/`, to check the real data format when the scales are first connected.
+
+| File | Purpose |
+|---|---|
+| `scaleServer.py` | Main program |
+| `scaleReader.py` | Scale connection, data parsing and weighing detection |
+| `recordStore.py` | Journal and daily Excel files |
+| `findScales.py` | Network scan for the converters |
+| `scaleSimulator.py` | Two fake scales for testing without hardware |
+| `config.json` | Settings (see below) |
 
 # How to run
-(Work in progress)
+Requires Python 3.10+.
+
+```
+pip install -r requirements.txt
+```
+
+**With the simulator** (no hardware needed), in two terminals:
+```
+python scaleSimulator.py          # add --fast for 10x speed, --flaky to drop connections
+python scaleServer.py --simulator # records go to logFiles/simulator/
+```
+
+**With the real scales:**
+1. Find the converters: `python scaleServer.py --scan` (or `--scan 192.168.0.0/24` for a specific network). It lists open devices and a sample of what they send.
+2. Put each scale's `host` and `port` in `config.json`.
+3. Run `python scaleServer.py`. Stop it with Ctrl+C.
+4. Open `logFiles/raw/` to see the scales' actual output. If weighings aren't being recorded, adjust the `parsing` patterns to match it.
+
+**Tests:** `python -m unittest discover -s tests -t .`
+
+## Settings (`config.json`)
+| Setting | Meaning |
+|---|---|
+| `scales` | Name, IP address (`host`), `port` and `enabled` for each real scale. A scale can have its own `parsing` block if its format differs. |
+| `simulator_scales` | The same for the simulator (used with `--simulator`) |
+| `parsing.stable_pattern` | Regular expression found only in stable readings (default `ST`) |
+| `parsing.weight_pattern` | Regular expression for the weight; the first match in each line is used, or its first group if it has one |
+| `zero_threshold` | Weights at or below this count as an empty scale |
+| `unit` | Unit shown in the Excel header |
+| `output_dir` | Where records and logs are saved |
+| `save_raw_data` | Save the scales' raw output to `logFiles/raw/` |
+
+> The default parsing patterns are based on common scale output formats. They haven't been checked against the WT1000/WT3000i yet.

@@ -1,0 +1,9 @@
+__pycache__/
+
+# Generated while running (records, journal, raw captures, app log)
+logFiles/
+
+# PyInstaller output
+build/
+dist/
+*.spec
