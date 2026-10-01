@@ -88,7 +88,7 @@ The parsing in `config.json` follows the Weightech technical manuals, but hasn't
 | WT1000 (LED and LCD, same protocol) | `0,010.000,000.200,009.800`: stability flag (`0` stable, `1` unstable), gross, tare, net | Own `parsing` block: lines starting with `0,` are stable, the **net** weight (4th field) is recorded. To record gross instead, set its `weight_pattern` to `^[01],\\s*([-+]?[\\d.]+)`. |
 
 ## Setting up the scales on-site
-The indicators and converters must be configured as below, or the app receives nothing or unreadable data. The indicator settings come from the Weightech technical manuals.
+The indicators and converters must be configured as below, or the app receives nothing or unreadable data. The indicator settings come from the Weightech technical manuals. For the full first test with the real scales (what to bring, steps with pass/fail checks, and what to collect if something fails), see [docs/onsite-test.md](docs/onsite-test.md).
 
 **WT1000** (hold `FUNC` for 5 seconds to open the user settings; `ACUM.` selects the parameter and `TARA` changes its value)
 - **P5 = 5**: continuous transmission, full mode with gross, tare and net. The indicator must be restarted after changing P5.
